@@ -1,244 +1,102 @@
 <?php
-// ภาษา: PHP
-// ชื่อไฟล์: recipe_list.php
-
+// ไฟล์: recipe_list.php (เวอร์ชัน Refactor)
 session_start();
-include_once __DIR__ . '/config_db.php';
-include_once __DIR__ . '/navbar.php';
+include 'config_db.php';
+include 'navbar.php';
 
-// --- ดึงค่าการค้นหาจาก GET ---
-$searchRmSize = trim($_GET['search_rm_size'] ?? '');
-$searchPartSize = trim($_GET['search_part_size'] ?? '');
-$searchHwSize = trim($_GET['search_hw_size'] ?? '');
-$searchSwSize = trim($_GET['search_sw_size'] ?? '');
-
-// --- เตรียมเงื่อนไข WHERE แบบไดนามิก ---
-$whereClauses = [];
-$params = [];
-$types = '';
-
-if ($searchRmSize !== '') {
-  // กรองตามขนาดไม้ท่อน
-  $whereClauses[] = "CONCAT(r.rm_thickness, ' x ', r.rm_width, ' x ', r.rm_length) LIKE ?";
-  $params[] = "%{$searchRmSize}%";
-  $types .= 's';
+if (!isset($_SESSION['username'])) {
+    header('Location: index.php');
+    exit();
 }
-if ($searchPartSize !== '') {
-  // กรองตามขนาดงานหลัก
-  $whereClauses[] = "CONCAT(p.part_thickness, ' x ', p.part_width, ' x ', p.part_length) LIKE ?";
-  $params[] = "%{$searchPartSize}%";
-  $types .= 's';
-}
-if ($searchHwSize !== '') {
-  // กรองตามขนาดหัวไม้
-  $whereClauses[] = "CONCAT(h.hw_thickness, ' x ', h.hw_width, ' x ', h.hw_length) LIKE ?";
-  $params[] = "%{$searchHwSize}%";
-  $types .= 's';
-}
-if ($searchSwSize !== '') {
-  // กรองตามขนาดเศษไม้
-  $whereClauses[] = "CONCAT(s.sw_thickness, ' x ', s.sw_width, ' x ', s.sw_length) LIKE ?";
-  $params[] = "%{$searchSwSize}%";
-  $types .= 's';
-}
-$whereSql = $whereClauses ? 'WHERE ' . implode(' AND ', $whereClauses) : '';
 
-// --- ค่า Pagination ---
-$perPage = 10;
-$currentPage = max(1, (int) ($_GET['page'] ?? 1));
-$offset = ($currentPage - 1) * $perPage;
+// --- 1. ดึงข้อมูลสำหรับ Dropdowns ทั้งหมด (ต้องดึงที่นี่เพื่อให้ recipe_list_modal.php ใช้ได้) ---
+$customers = $conn->query("SELECT customer_id, customer_name FROM customer ORDER BY customer_name")->fetch_all(MYSQLI_ASSOC);
+$rm_wood = $conn->query("SELECT rm_id, rm_code, rm_thickness, rm_width, rm_length, rm_m3 FROM rm_wood_list ORDER BY rm_code")->fetch_all(MYSQLI_ASSOC);
+$parts = $conn->query("SELECT part_id, part_code, part_type, part_thickness, part_width, part_length, part_m3 FROM part_list ORDER BY part_code")->fetch_all(MYSQLI_ASSOC);
 
-// --- นับแถวทั้งหมด ตามเงื่อนไขค้นหา ---
-$countSql = "
-    SELECT COUNT(*)
-    FROM recipe_list AS rl
-    JOIN rm_wood_list     AS r ON rl.rm_id   = r.rm_id
-    JOIN part_list        AS p ON rl.part_id = p.part_id
-    LEFT JOIN hw_wood_list AS h ON rl.hw_id  = h.hw_id
-    LEFT JOIN sw_wood_list AS s ON rl.sw_id  = s.sw_id
-    {$whereSql}
-";
-$countStmt = $conn->prepare($countSql);
-if ($types !== '') {
-  // ผูกพารามิเตอร์สำหรับกรอง
-  $countStmt->bind_param($types, ...$params);
-}
-$countStmt->execute();
-$countStmt->bind_result($totalRows);
-$countStmt->fetch();
-$countStmt->close();
-
-$totalPages = (int) ceil($totalRows / $perPage);
-
-// --- ดึงข้อมูลพร้อมเงื่อนไขและ Pagination ---
-$dataSql = "
-    SELECT
-      rl.recipe_id,
-      r.rm_id, r.rm_thickness, r.rm_width, r.rm_length, r.rm_type, rl.rm_qty, rl.rm_comment,
-      p.part_id, p.part_thickness, p.part_width, p.part_length, p.part_type, rl.part_qry AS part_qty, rl.part_cut, rl.part_split, rl.part_comment,
-      h.hw_id, h.hw_thickness, h.hw_width, h.hw_length, h.hw_type, rl.hw_qty, rl.hw_cut, rl.hw_split, rl.hw_comment,
-      s.sw_id, s.sw_thickness, s.sw_width, s.sw_length, s.sw_type, rl.sw_qty, rl.sw_cut, rl.sw_split, rl.sw_comment
-    FROM recipe_list AS rl
-    JOIN rm_wood_list     AS r ON rl.rm_id   = r.rm_id
-    JOIN part_list        AS p ON rl.part_id = p.part_id
-    LEFT JOIN hw_wood_list AS h ON rl.hw_id  = h.hw_id
-    LEFT JOIN sw_wood_list AS s ON rl.sw_id  = s.sw_id
-    {$whereSql}
-    ORDER BY rl.recipe_id DESC
-    LIMIT ?, ?
-";
-$dataStmt = $conn->prepare($dataSql);
-
-// ผูกพารามิเตอร์ทั้งเงื่อนไขและ Pagination
-$bindTypes = $types . 'ii';
-$dataParams = array_merge($params, [$offset, $perPage]);
-$dataStmt->bind_param($bindTypes, ...$dataParams);
-$dataStmt->execute();
-$result = $dataStmt->get_result();
+// --- 2. ดึงข้อมูลสูตรการผลิตทั้งหมดเพื่อมาแสดงในตาราง ---
+$sql = "SELECT 
+            r.recipe_id, rm.rm_code, pl.part_code AS primary_part_code
+        FROM recipe_list AS r
+        LEFT JOIN rm_wood_list AS rm ON r.rm_id = rm.rm_id
+        LEFT JOIN part_list AS pl ON r.p_part_id = pl.part_id
+        ORDER BY r.recipe_id DESC";
+$recipes_result = $conn->query($sql);
 ?>
-
-
-<div class="container mt-5">
-  <h2 class="mb-3">สูตรการตัดผ่าไม้</h2>
-
-  <!-- ฟอร์มค้นหา -->
-  <form method="get" class="row g-3 mb-4">
-    <div class="col-md-3">
-      <input type="text" class="form-control" name="search_rm_size" placeholder="ไม้ท่อน (หนา x กว้าง x ยาว)"
-        value="<?= htmlspecialchars($searchRmSize) ?>">
-    </div>
-    <div class="col-md-3">
-      <input type="text" class="form-control" name="search_part_size" placeholder="งานหลัก (หนา x กว้าง x ยาว)"
-        value="<?= htmlspecialchars($searchPartSize) ?>">
-    </div>
-    <div class="col-md-3">
-      <input type="text" class="form-control" name="search_hw_size" placeholder="หัวไม้ (หนา x กว้าง x ยาว)"
-        value="<?= htmlspecialchars($searchHwSize) ?>">
-    </div>
-    <div class="col-md-3">
-      <input type="text" class="form-control" name="search_sw_size" placeholder="เศษไม้ (หนา x กว้าง x ยาว)"
-        value="<?= htmlspecialchars($searchSwSize) ?>">
-    </div>
-    <div class="col-md-1">
-      <button type="submit" class="btn btn-primary w-100">ค้นหา</button>
-    </div>
-  </form>
-
-  <!-- ปุ่มเพิ่มสูตร -->
-  <button class="btn btn-success mb-4" data-bs-toggle="modal" data-bs-target="#recipeModal">เพิ่มสูตรการตัดผ่า</button>
-
-  <table class="table table-striped table-bordered text-center align-middle">
-    <thead class="table-dark">
-      <tr>
-        <th>ไม้ท่อน<br><small>ขนาด | ประเภท | จำนวน</small></th>
-        <th>งานหลัก<br><small>ขนาด | ประเภท | จำนวน</small></th>
-        <th>หัวไม้<br><small>ขนาด | ประเภท | จำนวน</small></th>
-        <th>เศษไม้<br><small>ขนาด | ประเภท | จำนวน</small></th>
-        <th>จัดการ</th>
-      </tr>
-    </thead>
-    <tbody>
-      <?php while ($row = $result->fetch_assoc()): ?>
-        <tr>
-          <td>
-            <?= htmlspecialchars("{$row['rm_thickness']} x {$row['rm_width']} x {$row['rm_length']} | {$row['rm_type']} | {$row['rm_qty']}") ?>
-          </td>
-          <td>
-            <?= htmlspecialchars("{$row['part_thickness']} x {$row['part_width']} x {$row['part_length']} | {$row['part_type']} | {$row['part_qty']}") ?>
-          </td>
-          <td>
-            <?php if ($row['hw_thickness'] !== null)
-              echo htmlspecialchars("{$row['hw_thickness']} x {$row['hw_width']} x {$row['hw_length']} | {$row['hw_type']} | {$row['hw_qty']}");
-            else
-              echo '<em>ไม่มี</em>'; ?>
-          </td>
-          <td>
-            <?php if ($row['sw_thickness'] !== null)
-              echo htmlspecialchars("{$row['sw_thickness']} x {$row['sw_width']} x {$row['sw_length']} | {$row['sw_type']} | {$row['sw_qty']}");
-            else
-              echo '<em>ไม่มี</em>'; ?>
-          </td>
-          <td>
-            <!-- ปรับเป็น data-id เพื่อให้ตรงกับ JS -->
-            <a href="#" class="btn btn-sm btn-info btn-detail me-1" data-bs-toggle="modal"
-              data-bs-target="#recipeDetailsModal" data-id="<?= $row['recipe_id'] ?>">
-              รายละเอียด
-            </a>
-
-            <!-- ปุ่มแก้ไข -->
-            <button class="btn btn-sm btn-primary me-1" data-bs-toggle="modal" data-bs-target="#recipeModal"
-              data-recipe-id="<?= $row['recipe_id'] ?>" data-rm-id="<?= $row['rm_id'] ?>"
-              data-rm-qty="<?= $row['rm_qty'] ?>"
-              data-rm-comment="<?= htmlspecialchars($row['rm_comment'], ENT_QUOTES) ?>"
-              data-part-id="<?= $row['part_id'] ?>" data-part-qty="<?= $row['part_qty'] ?>"
-              data-part-cut="<?= $row['part_cut'] ?>" data-part-split="<?= $row['part_split'] ?>"
-              data-part-comment="<?= htmlspecialchars($row['part_comment'], ENT_QUOTES) ?>"
-              data-hw-id="<?= $row['hw_id'] ?>" data-hw-qty="<?= $row['hw_qty'] ?>" data-hw-cut="<?= $row['hw_cut'] ?>"
-              data-hw-split="<?= $row['hw_split'] ?>"
-              data-hw-comment="<?= htmlspecialchars($row['hw_comment'], ENT_QUOTES) ?>" data-sw-id="<?= $row['sw_id'] ?>"
-              data-sw-qty="<?= $row['sw_qty'] ?>" data-sw-cut="<?= $row['sw_cut'] ?>"
-              data-sw-split="<?= $row['sw_split'] ?>"
-              data-sw-comment="<?= htmlspecialchars($row['sw_comment'], ENT_QUOTES) ?>">
-              แก้ไข
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>จัดการสูตรการผลิต (Recipe)</title>
+    <!-- CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css">
+    <link href="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/css/select2.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/select2-bootstrap-5-theme@1.3.0/dist/select2-bootstrap-5-theme.min.css" />
+    <style>
+        .container { background-color: #fff; border-radius: 8px; padding: 2rem; margin-top: 2rem; box-shadow: 0 2px 10px rgba(0,0,0,0.05); }
+        .form-label { font-weight: bold; }
+        .accordion-button:not(.collapsed) { background-color: #e7f1ff; color: #0c63e4; }
+        .select2-container--open { z-index: 9999999; }
+        .form-control[readonly] { background-color: #e9ecef; cursor: not-allowed; }
+        .calc-result { color: #0d6efd; font-weight: bold; }
+        .total-loss-section { background-color: #fff3cd; border: 1px solid #ffc107; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <h1><i class="bi bi-journal-bookmark-fill"></i> จัดการสูตรการผลิต (Recipe)</h1>
+            <button type="button" class="btn btn-primary" onclick="openRecipeModal()">
+                <i class="bi bi-plus-circle"></i> สร้างสูตรใหม่
             </button>
-            <!-- ปุ่มลบ -->
-            <form method="post" action="recipe_delete.php" style="display:inline;"
-              onsubmit="return confirm('ยืนยันลบสูตรนี้?');">
-              <input type="hidden" name="recipe_id" value="<?= $row['recipe_id'] ?>">
-              <button type="submit" class="btn btn-sm btn-danger">ลบ</button>
-            </form>
-          </td>
-        </tr>
-      <?php endwhile; ?>
-    </tbody>
-  </table>
+        </div>
 
-  <?php
-  // ฟังก์ชันแสดง Pagination พร้อมค่าส่งผ่าน URL ค้นหา
-  function ellipsis_pagination($totalPages, $currentPage, $queryParams)
-  {
-    $adj = 2;
-    if ($totalPages <= 1)
-      return;
-    echo '<nav><ul class="pagination justify-content-center">';
-    // ปุ่มหน้าแรก
-    if ($currentPage > 1)
-      echo '<li class="page-item"><a class="page-link" href="?' . http_build_query($queryParams + ['page' => 1]) . '">&laquo;</a></li>';
-    for ($i = 1; $i <= $totalPages; $i++) {
-      if ($i === 1 || $i === $totalPages || ($i >= $currentPage - $adj && $i <= $currentPage + $adj)) {
-        $active = $i === $currentPage ? ' active' : '';
-        echo '<li class="page-item' . $active . '"><a class="page-link" href="?' . http_build_query($queryParams + ['page' => $i]) . '">' . $i . '</a></li>';
-      } elseif ($i === 2 && $currentPage - $adj > 2) {
-        echo '<li class="page-item disabled"><span class="page-link">…</span></li>';
-      } elseif ($i === $totalPages - 1 && $currentPage + $adj < $totalPages - 1) {
-        echo '<li class="page-item disabled"><span class="page-link">…</span></li>';
-      }
-    }
-    if ($currentPage < $totalPages)
-      echo '<li class="page-item"><a class="page-link" href="?' . http_build_query($queryParams + ['page' => $totalPages]) . '">&raquo;</a></li>';
-    echo '</ul></nav>';
-  }
-  // เตรียมพารามิเตอร์เดิมสำหรับ Pagination
-  $queryParams = [
-    'search_rm_size' => $searchRmSize,
-    'search_part_size' => $searchPartSize,
-    'search_hw_size' => $searchHwSize,
-    'search_sw_size' => $searchSwSize
-  ];
-  ellipsis_pagination($totalPages, $currentPage, $queryParams);
-  ?>
+        <div class="table-responsive">
+            <table class="table table-striped table-hover table-bordered">
+                <thead class="table-dark text-center">
+                    <tr>
+                        <th>ID สูตร</th>
+                        <th>วัตถุดิบหลัก</th>
+                        <th>ชิ้นส่วนหลักที่ได้</th>
+                        <th>จัดการ</th>
+                    </tr>
+                </thead>
+                <tbody class="text-center">
+                    <?php if ($recipes_result && $recipes_result->num_rows > 0): ?>
+                        <?php while($row = $recipes_result->fetch_assoc()): ?>
+                            <tr>
+                                <td><?= htmlspecialchars($row['recipe_id']) ?></td>
+                                <td><?= htmlspecialchars($row['rm_code'] ?? 'N/A') ?></td>
+                                <td><?= htmlspecialchars($row['primary_part_code'] ?? 'N/A') ?></td>
+                                <td>
+                                    <button class="btn btn-warning btn-sm" onclick="openRecipeModal(<?= $row['recipe_id'] ?>)"><i class="bi bi-pencil-square"></i> แก้ไข</button>
+                                    <button class="btn btn-danger btn-sm" onclick="deleteRecipe(<?= $row['recipe_id'] ?>)"><i class="bi bi-trash"></i> ลบ</button>
+                                </td>
+                            </tr>
+                        <?php endwhile; ?>
+                    <?php else: ?>
+                        <tr><td colspan="4" class="text-center">ยังไม่มีข้อมูลสูตรการผลิต</td></tr>
+                    <?php endif; ?>
+                </tbody>
+            </table>
+        </div>
+    </div>
 
-  <!-- โหลดโค้ด popup จาก recipe_modals.php -->
-  <?php include_once __DIR__ . '/recipe_modals.php'; ?>
-  <!-- เรียก modal แสดงรายละเอียด -->
-  <?php include_once __DIR__ . '/recipe_details_modals.php'; ?>
+    <!-- ★★★ เรียกใช้ Modal จากไฟล์ภายนอก ★★★ -->
+    <?php include 'recipe_list_modal.php'; ?>
 
-</div>
+    <?php include 'footer.php'; ?>
+    
+    <!-- JavaScript Libraries -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+    <script src="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/js/select2.min.js"></script>
+
+    <!-- ★★★ เรียกใช้ฟังก์ชัน JavaScript จากไฟล์ภายนอก ★★★ -->
+    <?php include 'recipe_list_function.php'; ?>
+
 </body>
-
-
-<!-- Select2 JS (CDN) -->
-<script src="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/js/select2.min.js"></script>
-<!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script> -->
-
 </html>
