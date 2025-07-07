@@ -63,7 +63,9 @@ function getMenuItems($user_department, $user_level)
                 ['title' => 'จัดเตรียมไม้สำหรับงานผลิต (งานเบิกซ่อม)', 'url' => 'wip_manage_issue_repair.php'],
                 ['title' => 'รายการส่งคืนไม้', 'url' => 'return_list.php'],
                 ['title' => 'ตรวจรับงานผลิต', 'url' => 'product_complete_list.php'],
-                ['title' => 'สรุปการเบิกไม้', 'url' => 'wood_issue_summary.php']
+                ['title' => 'สรุปการเบิกไม้', 'url' => 'wood_issue_summary.php'],
+                ['title' => 'รายงานสรุปปริมาตรไม้', 'url' => 'm3_summary_report.php'],
+                ['title' => 'รายงานสรุปปริมาตรไม้เบิกซ่อม', 'url' => 'repair_issue_summary.php']
             ]
         ];
 
