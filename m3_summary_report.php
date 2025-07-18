@@ -1,5 +1,5 @@
 <?php
-// ไฟล์: m3_summary_report.php (เวอร์ชันปรับปรุง)
+// ไฟล์: m3_summary_report.php (ค้นหา 2 เงื่อนไข)
 session_start();
 include 'config_db.php';
 include 'navbar.php';
@@ -31,24 +31,33 @@ $main_query_sql = "
         jc.send_by AS sender_name, jc.receive_by AS receiver_name,
         wi.prod_id, pl.prod_code, pl.prod_partno, wi.quantity AS main_job_quantity
     FROM jobs_complete AS jc
-    LEFT JOIN wood_issue AS wi ON jc.job_id = wi.job_id AND wi.issue_type = 'ใบเบิกใช้'
+    INNER JOIN wood_issue AS wi ON jc.job_id = wi.job_id
     LEFT JOIN prod_list AS pl ON wi.prod_id = pl.prod_id
+    WHERE wi.job_type NOT IN ('งานพาเลทไม้อัด','งานไม้ PACK','งานภายใน','PALLET RETURN')
 ";
 
-$where_clauses = [];
+// ======================= START: CODE MODIFICATION =======================
+// ปรับปรุง Logic การค้นหาให้รองรับ 2 เงื่อนไขพร้อมกัน (AND)
+$additional_conditions = [];
+
+// เงื่อนไขที่ 1: ค้นหาตาม Job ID (ถ้ามีการกรอก)
 if (!empty($search_job_id)) {
-    $where_clauses[] = "jc.job_id LIKE ?";
+    $additional_conditions[] = "jc.job_id LIKE ?";
     $params[] = "%" . $search_job_id . "%";
     $types .= 's';
-} else {
-    $where_clauses[] = "DATE(jc.date_receive) BETWEEN ? AND ?";
+}
+
+// เงื่อนไขที่ 2: ค้นหาตามช่วงวันที่ (จะทำงานเสมอ เนื่องจากมีค่า default)
+if (!empty($start_date) && !empty($end_date)) {
+    $additional_conditions[] = "DATE(jc.date_receive) BETWEEN ? AND ?";
     $params[] = $start_date;
     $params[] = $end_date;
     $types .= 'ss';
 }
+// ======================== END: CODE MODIFICATION ========================
 
-if (!empty($where_clauses)) {
-    $main_query_sql .= " WHERE " . implode(' AND ', $where_clauses);
+if (!empty($additional_conditions)) {
+    $main_query_sql .= " AND " . implode(' AND ', $additional_conditions);
 }
 
 $main_query_sql .= " ORDER BY jc.date_receive DESC";
@@ -62,25 +71,13 @@ if ($stmt) {
     $all_completed_jobs = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
     $stmt->close();
 } else {
-    die("SQL Error: " . $conn->error);
+    die("SQL Prepare Error: " . $conn->error);
 }
-
-// --- 2. จัดการ Pagination ด้วย PHP ---
-$total_rows = count($all_completed_jobs);
-$total_pages = ceil($total_rows / $limit);
-$jobs_for_this_page = array_slice($all_completed_jobs, $offset, $limit);
 
 // ประกาศตัวแปรสำหรับเก็บยอดรวม
 $page_total_prod_complete_qty = 0;
-$page_total_main_m3 = 0; // ยังคงคำนวณเพื่อรวมใน net_m3
-$page_total_repair_m3 = 0; // ยังคงคำนวณเพื่อรวมใน net_m3
-$page_total_returned_m3 = 0; // ยังคงคำนวณเพื่อรวมใน net_m3
 $page_total_net_m3 = 0;
-
 $grand_total_prod_complete_qty = 0;
-$grand_total_main_m3 = 0; // ยังคงคำนวณเพื่อรวมใน net_m3
-$grand_total_repair_m3 = 0; // ยังคงคำนวณเพื่อรวมใน net_m3
-$grand_total_returned_m3 = 0; // ยังคงคำนวณเพื่อรวมใน net_m3
 $grand_total_net_m3 = 0;
 
 $results = [];
@@ -90,14 +87,12 @@ if (!empty($all_completed_jobs)) {
     $all_job_ids = array_column($all_completed_jobs, 'job_id');
     $all_prod_ids = array_unique(array_filter(array_column($all_completed_jobs, 'prod_id')));
     
-    // Helper function for bind_param references
     $ref_values = function($arr) {
         $refs = [];
         foreach($arr as $key => $value) $refs[$key] = &$arr[$key];
         return $refs;
     };
 
-    // ดึงข้อมูลประกอบ (BOM, Repair, Return, Parts) ทีเดียว
     $boms_data = [];
     if (!empty($all_prod_ids)) {
         $prod_ids_placeholder = implode(',', array_fill(0, count($all_prod_ids), '?'));
@@ -133,27 +128,43 @@ if (!empty($all_completed_jobs)) {
     foreach ($boms_data as $bom) { $parts = json_decode($bom['parts'], true); if (is_array($parts)) $all_part_ids_for_lookup = array_merge($all_part_ids_for_lookup, array_column($parts, 'part_id')); }
     foreach ($repair_jobs_data as $repairs) { foreach ($repairs as $repair) { $parts = json_decode($repair['part_quantity_reason'], true); if (is_array($parts)) $all_part_ids_for_lookup = array_merge($all_part_ids_for_lookup, array_column($parts, 'part_id')); } }
     
-    $part_m3_map = [];
+    $part_data_map = [];
     if (!empty($all_part_ids_for_lookup)) {
         $unique_part_ids = array_unique(array_filter($all_part_ids_for_lookup));
         if (!empty($unique_part_ids)) {
             $part_ids_placeholder = implode(',', array_fill(0, count($unique_part_ids), '?'));
             $part_ids_types = str_repeat('i', count($unique_part_ids));
-            $stmt = $conn->prepare("SELECT part_id, part_m3 FROM part_list WHERE part_id IN ($part_ids_placeholder)");
+            
+            // *** สำคัญ: ตรวจสอบให้แน่ใจว่า 'part_type' คือชื่อคอลัมน์ที่ถูกต้อง ***
+            $stmt = $conn->prepare("SELECT part_id, part_m3, part_type FROM part_list WHERE part_id IN ($part_ids_placeholder)");
+            
             call_user_func_array([$stmt, 'bind_param'], $ref_values(array_merge([$part_ids_types], $unique_part_ids)));
             $stmt->execute();
             $res = $stmt->get_result();
-            while ($row = $res->fetch_assoc()) $part_m3_map[$row['part_id']] = (float)$row['part_m3'];
+            while ($row = $res->fetch_assoc()) {
+                $part_data_map[$row['part_id']] = [
+                    'm3'   => (float)$row['part_m3'],
+                    'type' => trim($row['part_type'] ?? '') 
+                ];
+            }
             $stmt->close();
         }
     }
 
+    $allowed_types = [
+        "PINE NON FSC", "PINE NON FSC ไส", "PINE NON FSC*", "PINE NON FSC*2",
+        "PINE NON FSCไส1ด้าน", "PINE NON FSC*4", "PINE NON FSCไสเหลือ 22",
+        "PINE NON FSCไสเหลือ 50", "PINE NON FSC บาก", "STOPPER",
+        "Pine wood shocking", "PINE NON FSC เฉือน", "PINE NON FSC สโลป1แผ่น",
+        "PINE NON FSC สโลป2แผ่น", "*** ไม้แพ็ค ***", "PINE NON FSC บาก2แบบ",
+        "PINE NON FSC เฉือนหัว-ท้าย", "PINE NON FSC สโลป"
+    ];
+
     // --- 4. คำนวณ M3 และยอดรวมทั้งหมด (Grand Total) ---
-    foreach ($all_completed_jobs as $job) {
+    foreach ($all_completed_jobs as &$job) { 
         $job_id = $job['job_id'];
         $main_m3 = 0; $repair_m3 = 0;
         
-        // Calculate main_m3
         if (isset($boms_data[$job['prod_id']])) {
             $parts = json_decode($boms_data[$job['prod_id']]['parts'], true);
             $job_quantity = (int)$job['main_job_quantity'];
@@ -162,15 +173,14 @@ if (!empty($all_completed_jobs)) {
                 foreach ($parts as $part) {
                     $part_id = $part['part_id'] ?? null;
                     $part_qty = (int)($part['quantity'] ?? $part['part_qty'] ?? 0);
-                    if ($part_id && isset($part_m3_map[$part_id])) {
-                        $bom_m3_sum += ($part_m3_map[$part_id]) * $part_qty;
+                    if ($part_id && isset($part_data_map[$part_id]) && in_array($part_data_map[$part_id]['type'], $allowed_types)) {
+                        $bom_m3_sum += ($part_data_map[$part_id]['m3']) * $part_qty;
                     }
                 }
             }
             $main_m3 = $bom_m3_sum * $job_quantity;
         }
         
-        // Calculate repair_m3
         if (isset($repair_jobs_data[$job_id])) {
             foreach($repair_jobs_data[$job_id] as $repair) {
                 $parts = json_decode($repair['part_quantity_reason'], true);
@@ -178,8 +188,8 @@ if (!empty($all_completed_jobs)) {
                     foreach ($parts as $part) {
                         $part_id = $part['part_id'] ?? null;
                         $part_qty = (int)($part['quantity'] ?? 0);
-                        if ($part_id && isset($part_m3_map[$part_id])) {
-                            $repair_m3 += ($part_m3_map[$part_id]) * $part_qty;
+                        if ($part_id && isset($part_data_map[$part_id]) && in_array($part_data_map[$part_id]['type'], $allowed_types)) {
+                            $repair_m3 += ($part_data_map[$part_id]['m3']) * $part_qty;
                         }
                     }
                 }
@@ -188,108 +198,51 @@ if (!empty($all_completed_jobs)) {
         
         $returned_m3 = $returned_wood_data[$job_id] ?? 0;
         $net_m3 = ($main_m3 + $repair_m3) - $returned_m3;
+
+        $job['net_m3'] = $net_m3; 
 
         $grand_total_prod_complete_qty += (int)$job['prod_complete_qty'];
-        $grand_total_main_m3 += $main_m3;
-        $grand_total_repair_m3 += $repair_m3;
-        $grand_total_returned_m3 += $returned_m3;
         $grand_total_net_m3 += $net_m3;
     }
+    unset($job); 
 
-    // --- 5. เตรียมข้อมูลสำหรับแสดงผลในหน้าปัจจุบัน และคำนวณยอดรวมหน้านี้ (Page Total) ---
+    // --- 5. จัดการ Pagination และเตรียมข้อมูลสำหรับแสดงผลในหน้าปัจจุบัน ---
+    $total_rows = count($all_completed_jobs);
+    $total_pages = ceil($total_rows / $limit);
+    $jobs_for_this_page = array_slice($all_completed_jobs, $offset, $limit);
+
     foreach ($jobs_for_this_page as $job) {
-        $job_id = $job['job_id'];
-        $main_m3 = 0; $repair_m3 = 0;
-        
-        // Calculate main_m3 (same logic as above)
-        if (isset($boms_data[$job['prod_id']])) {
-            $parts = json_decode($boms_data[$job['prod_id']]['parts'], true);
-            $job_quantity = (int)$job['main_job_quantity'];
-            $bom_m3_sum = 0;
-            if (is_array($parts)) {
-                foreach ($parts as $part) {
-                    $part_id = $part['part_id'] ?? null;
-                    $part_qty = (int)($part['quantity'] ?? $part['part_qty'] ?? 0);
-                    if ($part_id && isset($part_m3_map[$part_id])) {
-                        $bom_m3_sum += ($part_m3_map[$part_id]) * $part_qty;
-                    }
-                }
-            }
-            $main_m3 = $bom_m3_sum * $job_quantity;
-        }
-        
-        // Calculate repair_m3 (same logic as above)
-        if (isset($repair_jobs_data[$job_id])) {
-            foreach($repair_jobs_data[$job_id] as $repair) {
-                $parts = json_decode($repair['part_quantity_reason'], true);
-                if (is_array($parts)) {
-                    foreach ($parts as $part) {
-                        $part_id = $part['part_id'] ?? null;
-                        $part_qty = (int)($part['quantity'] ?? 0);
-                        if ($part_id && isset($part_m3_map[$part_id])) {
-                            $repair_m3 += ($part_m3_map[$part_id]) * $part_qty;
-                        }
-                    }
-                }
-            }
-        }
-        
-        $returned_m3 = $returned_wood_data[$job_id] ?? 0;
-        $net_m3 = ($main_m3 + $repair_m3) - $returned_m3;
-
         $page_total_prod_complete_qty += (int)$job['prod_complete_qty'];
-        $page_total_main_m3 += $main_m3;
-        $page_total_repair_m3 += $repair_m3;
-        $page_total_returned_m3 += $returned_m3;
-        $page_total_net_m3 += $net_m3;
-
-        $results[] = array_merge($job, [
-            'main_m3' => $main_m3, 'repair_m3' => $repair_m3,
-            'returned_m3' => $returned_m3, 'net_m3' => $net_m3
-        ]);
+        $page_total_net_m3 += $job['net_m3'];
+        $results[] = $job;
     }
 }
 
 function generate_pagination($current_page, $total_pages, $url_params) {
-    // เริ่มต้นสร้าง HTML ของ Pagination ด้วย Bootstrap 5
     $html = '<nav aria-label="Page navigation"><ul class="pagination justify-content-center">';
-    
-    // กำหนดจำนวนหน้าที่ต้องการให้แสดงข้างๆ หน้าปัจจุบัน
     $window = 2; 
 
-    // --- 1. สร้างปุ่ม "ก่อนหน้า" (Previous) ---
     if ($current_page > 1) {
-        // ถ้าไม่ใช่หน้าแรก ให้สร้างเป็นลิงก์ที่คลิกได้
         $html .= '<li class="page-item"><a class="page-link" href="?page=' . ($current_page - 1) . '&' . $url_params . '">ก่อนหน้า</a></li>';
     } else {
-        // ถ้าเป็นหน้าแรก ให้แสดงเป็นปุ่มที่คลิกไม่ได้ (disabled)
         $html .= '<li class="page-item disabled"><span class="page-link">ก่อนหน้า</span></li>';
     }
 
-    // --- 2. สร้างลิงก์หน้าแรก และเครื่องหมาย "..." ---
-    // จะแสดงส่วนนี้ก็ต่อเมื่อหน้าปัจจุบันอยู่ไกลจากหน้าแรกมากพอ
     if ($current_page > $window + 1) {
         $html .= '<li class="page-item"><a class="page-link" href="?page=1&' . $url_params . '">1</a></li>';
-        // แสดงเครื่องหมาย ... เพื่อย่อหน้าที่อยู่ระหว่างกลาง
         if ($current_page > $window + 2) {
             $html .= '<li class="page-item disabled"><span class="page-link">...</span></li>';
         }
     }
 
-    // --- 3. สร้างลิงก์หน้าที่อยู่รอบๆ หน้าปัจจุบัน ---
-    // วนลูปเพื่อสร้างลิงก์ตามจำนวนที่กำหนดใน $window
     for ($i = max(1, $current_page - $window); $i <= min($total_pages, $current_page + $window); $i++) {
         if ($i == $current_page) {
-            // ถ้าเป็นหน้าปัจจุบัน ให้แสดงเป็นปุ่ม active
             $html .= '<li class="page-item active" aria-current="page"><span class="page-link">' . $i . '</span></li>';
         } else {
-            // หน้าอื่นๆ ให้แสดงเป็นลิงก์ปกติ
             $html .= '<li class="page-item"><a class="page-link" href="?page=' . $i . '&' . $url_params . '">' . $i . '</a></li>';
         }
     }
 
-    // --- 4. สร้างลิงก์หน้าสุดท้าย และเครื่องหมาย "..." ---
-    // จะแสดงส่วนนี้ก็ต่อเมื่อหน้าปัจจุบันอยู่ไกลจากหน้าสุดท้ายมากพอ
     if ($current_page < $total_pages - $window) {
         if ($current_page < $total_pages - $window - 1) {
             $html .= '<li class="page-item disabled"><span class="page-link">...</span></li>';
@@ -297,12 +250,9 @@ function generate_pagination($current_page, $total_pages, $url_params) {
         $html .= '<li class="page-item"><a class="page-link" href="?page=' . $total_pages . '&' . $url_params . '">' . $total_pages . '</a></li>';
     }
 
-    // --- 5. สร้างปุ่ม "ถัดไป" (Next) ---
     if ($current_page < $total_pages) {
-        // ถ้าไม่ใช่หน้าสุดท้าย ให้สร้างเป็นลิงก์ที่คลิกได้
         $html .= '<li class="page-item"><a class="page-link" href="?page=' . ($current_page + 1) . '&' . $url_params . '">ถัดไป</a></li>';
     } else {
-        // ถ้าเป็นหน้าสุดท้าย ให้แสดงเป็นปุ่มที่คลิกไม่ได้ (disabled)
         $html .= '<li class="page-item disabled"><span class="page-link">ถัดไป</span></li>';
     }
 
@@ -315,7 +265,7 @@ function generate_pagination($current_page, $total_pages, $url_params) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>รายงานสรุปปริมาตรไม้ (m³)</title>
+    <title>รายงานสรุปยอดผลิตพาเลทไม้สน</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css">
     <link rel="stylesheet" type="text/css" href="https://cdn.jsdelivr.net/npm/daterangepicker/daterangepicker.css" />
@@ -326,27 +276,25 @@ function generate_pagination($current_page, $total_pages, $url_params) {
         .table th, .table td { vertical-align: middle; text-align: center; }
         .table .text-start { text-align: left !important; }
         .table tfoot th { font-weight: bold; background-color: #f8f9fa; }
-        /* Adjusted column widths */
-        .table th:nth-child(1), .table td:nth-child(1) { width: 15%; } /* Job ID */
-        .table th:nth-child(2), .table td:nth-child(2) { width: 20%; } /* Product Code */
-        .table th:nth-child(3), .table td:nth-child(3) { width: 20%; } /* Part Code */
-        .table th:nth-child(4), .table td:nth-child(4) { width: 10%; } /* จำนวนผลิตเสร็จ */
-        .table th:nth-child(5), .table td:nth-child(5) { width: 15%; } /* วันที่รับงาน */
-        .table th:nth-child(6), .table td:nth-child(6) { width: 20%; } /* M³ สุทธิ */
-        /* For the summary rows in tfoot, adjust colspan if needed based on new columns */
-        .table tfoot th:nth-child(1) { text-align: end; } /* "ยอดรวมหน้านี้" and "ยอดรวมทั้งหมด" */
+        .table th:nth-child(1), .table td:nth-child(1) { width: 15%; }
+        .table th:nth-child(2), .table td:nth-child(2) { width: 20%; }
+        .table th:nth-child(3), .table td:nth-child(3) { width: 20%; }
+        .table th:nth-child(4), .table td:nth-child(4) { width: 10%; }
+        .table th:nth-child(5), .table td:nth-child(5) { width: 15%; }
+        .table th:nth-child(6), .table td:nth-child(6) { width: 20%; }
+        .table tfoot th:nth-child(1) { text-align: end; }
     </style>
 </head>
 <body>
     <div class="container-fluid">
-        <h1 class="mb-4"><i class="bi bi-bar-chart-line-fill text-primary"></i> รายงานสรุปปริมาตรไม้ (m³)</h1>
+        <h1 class="mb-4"><i class="bi bi-bar-chart-line-fill text-primary"></i> รายงานสรุปยอดผลิตพาเลทไม้สน</h1>
         <form method="GET" class="row g-3 align-items-center mb-4 p-3 border rounded bg-light">
             <div class="col-md-4">
                 <label for="search_job_id" class="form-label">ค้นหาโดย Job ID:</label>
-                <input type="text" id="search_job_id" name="search_job_id" class="form-control" value="<?= htmlspecialchars($search_job_id) ?>" placeholder="กรอก Job ID ที่ต้องการค้นหา...">
+                <input type="text" id="search_job_id" name="search_job_id" class="form-control" value="<?= htmlspecialchars($search_job_id) ?>" placeholder="กรอก Job ID และ/หรือเลือกวันที่">
             </div>
             <div class="col-md-4">
-                <label for="daterange" class="form-label">หรือเลือกช่วงวันที่รับงาน:</label>
+                <label for="daterange" class="form-label">และ/หรือเลือกช่วงวันที่รับงาน:</label>
                 <input type="text" id="daterange" name="daterange" class="form-control">
                 <input type="hidden" id="start_date" name="start_date" value="<?= htmlspecialchars($start_date) ?>">
                 <input type="hidden" id="end_date" name="end_date" value="<?= htmlspecialchars($end_date) ?>">
@@ -386,7 +334,7 @@ function generate_pagination($current_page, $total_pages, $url_params) {
                             </tr>
                         <?php endforeach; ?>
                     <?php else: ?>
-                        <tr><td colspan="6" class="text-center p-4">ไม่พบข้อมูลตามเงื่อนไขที่ค้นหา</td></tr> <!-- Adjusted colspan -->
+                        <tr><td colspan="6" class="text-center p-4">ไม่พบข้อมูลตามเงื่อนไขที่ค้นหา</td></tr>
                     <?php endif; ?>
                 </tbody>
                 <?php if (!empty($results)): ?>
@@ -406,7 +354,7 @@ function generate_pagination($current_page, $total_pages, $url_params) {
             </table>
         </div>
 
-        <?php if ($total_pages > 1): ?>
+        <?php if (isset($total_pages) && $total_pages > 1): ?>
             <?php 
                 $query_params = http_build_query([
                     'start_date' => $start_date,
@@ -446,17 +394,10 @@ function generate_pagination($current_page, $total_pages, $url_params) {
                 $('#end_date').val(end.format('YYYY-MM-DD'));
             });
 
-            if ($('#search_job_id').val().trim() !== '') {
-                $('#daterange').prop('disabled', true).css('background-color', '#e9ecef');
-            }
-
-            $('#search_job_id').on('input', function() {
-                if ($(this).val().trim() !== '') {
-                    $('#daterange').prop('disabled', true).css('background-color', '#e9ecef');
-                } else {
-                    $('#daterange').prop('disabled', false).css('background-color', '');
-                }
-            });
+            // ======================= START: CODE MODIFICATION =======================
+            // ลบ JavaScript ที่ปิดการใช้งาน daterange ออก
+            // เพื่อให้สามารถกรอก Job ID และเลือกวันที่พร้อมกันได้
+            // ======================== END: CODE MODIFICATION ========================
         });
     </script>
 </body>

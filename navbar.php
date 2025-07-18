@@ -93,10 +93,14 @@ function getMenuItems($user_department, $user_level)
             'title' => 'WIP',
             'submenu' => [
                 ['title' => 'คลัง WIP', 'url' => 'wip_inventory.php'],
+                ['title' => 'รายการงานที่สั่ง', 'url' => 'cutting_job_list.php'],
                 ['title' => 'รูปแบบการผลิต', 'url' => 'recipe_list.php'], 
                 ['title' => 'ไม้ท่อน', 'url' => 'rm_list.php'],
                 ['title' => 'หัวไม้', 'url' => 'hw_list.php'],
-                ['title' => 'เศษไม้', 'url' => 'sw_list.php'], 
+                ['title' => 'เศษไม้', 'url' => 'sw_list.php'],
+                ['title' => 'ออกใบเบิกไม้ท่อน', 'url' => 'issue_wood_log.php'], 
+                ['title' => 'ประวัติการเบิกไม้ท่อน', 'url' => 'issue_history.php'], 
+                
             ]
         ];
     }
