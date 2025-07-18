@@ -101,4 +101,29 @@ function updateIssueStatus($issue_id, $new_status) {
     }
 }
 
+function getUserThaiName($conn, $user_id) {
+    $thainame = "ไม่ระบุ"; // ค่าเริ่มต้นหากไม่พบ
+    
+    // [Cyber Security] ใช้ Prepared Statement เพื่อป้องกัน SQL Injection
+    $sql = "SELECT thainame FROM prod_user WHERE user_id = ?";
+    $stmt = $conn->prepare($sql);
+
+    if ($stmt) {
+        // ผูกค่าพารามิเตอร์: "i" สำหรับ integer (user_id)
+        $stmt->bind_param("i", $user_id);
+        $stmt->execute();
+        $result = $stmt->get_result();
+
+        // ตรวจสอบว่ามีข้อมูลหรือไม่
+        if ($row = $result->fetch_assoc()) {
+            $thainame = $row['thainame'];
+        }
+        $stmt->close(); // ปิด statement
+    } else {
+        // [Error Handling] หากเตรียมคำสั่งไม่สำเร็จ
+        error_log("Error preparing statement for getUserThaiName: " . $conn->error);
+    }
+    return $thainame;
+}
+
 ?>
